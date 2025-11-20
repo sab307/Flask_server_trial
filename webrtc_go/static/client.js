@@ -1,5 +1,5 @@
 /**
- * WebRTC Video Receiver Client
+ * WebRTC Video Receiver Client with Latency Measurement
  * Handles WebRTC connection, metrics collection, and real-time visualization
  */
 
@@ -196,21 +196,6 @@ async function startStream() {
             document.getElementById('ice-state').textContent = pc.iceConnectionState;
         };
         
-        // pc.ontrack = (event) => {
-        //     console.log('Received remote track:', event.track.kind);
-            
-        //     if (event.track.kind === 'video') {
-        //         const video = document.getElementById('video');
-        //         video.srcObject = event.streams[0];
-                
-        //         video.onloadedmetadata = () => {
-        //             const resolution = `${video.videoWidth}x${video.videoHeight}`;
-        //             document.getElementById('resolution-value').textContent = resolution;
-        //             console.log('Video resolution:', resolution);
-        //         };
-        //     }
-        // };
-
         pc.ontrack = (event) => {
             console.log('✅ Received remote track:', event.track.kind);
             console.log('Track settings:', event.track.getSettings());
@@ -218,46 +203,43 @@ async function startStream() {
             if (event.track.kind === 'video') {
                 const video = document.getElementById('video');
         
-                // ✅ Add detailed logging
                 console.log('Setting srcObject on video element');
                 video.srcObject = event.streams[0];
         
-        video.onloadedmetadata = () => {
-            const resolution = `${video.videoWidth}x${video.videoHeight}`;
-            document.getElementById('resolution-value').textContent = resolution;
-            console.log('✅ Video metadata loaded:', resolution);
-        };
+                video.onloadedmetadata = () => {
+                    const resolution = `${video.videoWidth}x${video.videoHeight}`;
+                    document.getElementById('resolution-value').textContent = resolution;
+                    console.log('✅ Video metadata loaded:', resolution);
+                };
         
-        // ✅ NEW: Add more event listeners
-        video.onloadeddata = () => {
-            console.log('✅ Video data loaded');
-        };
+                video.onloadeddata = () => {
+                    console.log('✅ Video data loaded');
+                };
         
-        video.onplay = () => {
-            console.log('✅ Video started playing');
-        };
+                video.onplay = () => {
+                    console.log('✅ Video started playing');
+                };
         
-        video.onerror = (e) => {
-            console.error('❌ Video element error:', e);
-            console.error('Video error code:', video.error?.code);
-            console.error('Video error message:', video.error?.message);
-        };
+                video.onerror = (e) => {
+                    console.error('❌ Video element error:', e);
+                    console.error('Video error code:', video.error?.code);
+                    console.error('Video error message:', video.error?.message);
+                };
         
-        video.onstalled = () => {
-            console.warn('⚠️  Video stalled');
-        };
+                video.onstalled = () => {
+                    console.warn('⚠️  Video stalled');
+                };
         
-        // ✅ Force play after a delay
-        setTimeout(() => {
-                console.log('Attempting to play video...');
-                video.play().then(() => {
-                    console.log('✅ Video play successful');
-                }).catch(err => {
-                    console.error('❌ Video play failed:', err);
-                });
-            }, 1000);
-        }   
-    };
+                setTimeout(() => {
+                    console.log('Attempting to play video...');
+                    video.play().then(() => {
+                        console.log('✅ Video play successful');
+                    }).catch(err => {
+                        console.error('❌ Video play failed:', err);
+                    });
+                }, 1000);
+            }   
+        };
         
         // Add transceiver for receiving video
         pc.addTransceiver('video', { direction: 'recvonly' });
@@ -265,12 +247,9 @@ async function startStream() {
         // Create offer
         const offer = await pc.createOffer();
         
-        // ✅ Just log it, don't modify:
         console.log('📤 LOCAL SDP (Offer):\n', offer.sdp);
-        console.log('Modified SDP:', offer.sdp);
 
         await pc.setLocalDescription(offer);
-        console.log('📤 LOCAL SDP (Offer):\n', pc.localDescription.sdp);
         console.log('Created offer, sending to server...');
         
         // Send offer to Go server
@@ -304,188 +283,6 @@ async function startStream() {
         stopStream();
     }
 }
-
-// async function startStream() {
-//     const startBtn = document.getElementById('start-btn');
-//     const stopBtn = document.getElementById('stop-btn');
-    
-//     try {
-//         startBtn.disabled = true;
-//         updateStatus('connecting', 'Connecting...');
-        
-//         pc = new RTCPeerConnection({
-//             iceServers: [
-//                 { urls: 'stun:stun.l.google.com:19302' },
-//                 { urls: 'stun:stun1.l.google.com:19302' }
-//             ]
-//         });
-        
-//         console.log('RTCPeerConnection created');
-        
-//         pc.onconnectionstatechange = () => {
-//             console.log('Connection state:', pc.connectionState);
-//             document.getElementById('connection-state').textContent = pc.connectionState;
-            
-//             if (pc.connectionState === 'connected') {
-//                 updateStatus('connected', '✓ Connected - Streaming');
-//                 document.getElementById('video-overlay').style.display = 'block';
-//                 connectionStartTime = Date.now();
-//                 startDurationTimer();
-//             } else if (pc.connectionState === 'disconnected') {
-//                 updateStatus('disconnected', 'Disconnected');
-//                 stopStream();
-//             } else if (pc.connectionState === 'failed') {
-//                 updateStatus('error', 'Connection Failed');
-//                 stopStream();
-//             }
-//         };
-        
-//         pc.oniceconnectionstatechange = () => {
-//             console.log('ICE connection state:', pc.iceConnectionState);
-//             document.getElementById('ice-state').textContent = pc.iceConnectionState;
-//         };
-        
-//         pc.ontrack = (event) => {
-//             console.log('✅ Received remote track:', event.track.kind);
-//             console.log('Track settings:', event.track.getSettings());
-            
-//             if (event.track.kind === 'video') {
-//                 const video = document.getElementById('video');
-                
-//                 console.log('Setting srcObject on video element');
-//                 video.srcObject = event.streams[0];
-                
-//                 video.onloadedmetadata = () => {
-//                     const resolution = `${video.videoWidth}x${video.videoHeight}`;
-//                     document.getElementById('resolution-value').textContent = resolution;
-//                     console.log('✅ Video metadata loaded:', resolution);
-//                 };
-                
-//                 video.onloadeddata = () => {
-//                     console.log('✅ Video data loaded');
-//                 };
-                
-//                 video.onplay = () => {
-//                     console.log('✅ Video started playing');
-//                 };
-                
-//                 video.onerror = (e) => {
-//                     console.error('❌ Video element error:', e);
-//                     console.error('Video error code:', video.error?.code);
-//                     console.error('Video error message:', video.error?.message);
-//                 };
-                
-//                 video.onstalled = () => {
-//                     console.warn('⚠️  Video stalled');
-//                 };
-                
-//                 setTimeout(() => {
-//                     console.log('Attempting to play video...');
-//                     video.play().then(() => {
-//                         console.log('✅ Video play successful');
-//                     }).catch(err => {
-//                         console.error('❌ Video play failed:', err);
-//                     });
-//                 }, 1000);
-//             }
-//         };
-        
-//         // Add transceiver for receiving video
-//         pc.addTransceiver('video', { direction: 'recvonly' });
-        
-//         // Create offer
-//         const offer = await pc.createOffer();
-        
-//         console.log('📤 Original Offer SDP:', offer.sdp);
-        
-//         // ✅ Modify SDP to prefer H.264 and remove other codecs
-//         let sdp = offer.sdp;
-        
-//         // Find the video m= line
-//         const lines = sdp.split('\r\n');
-//         let videoLineIndex = -1;
-//         let newVideoFormats = [];
-        
-//         for (let i = 0; i < lines.length; i++) {
-//             if (lines[i].startsWith('m=video')) {
-//                 videoLineIndex = i;
-//                 // Extract H.264 payload types (126, 97, 105, 103)
-//                 const parts = lines[i].split(' ');
-//                 const formats = parts.slice(3); // Get all format numbers
-                
-//                 // Keep only H.264 formats (126, 97, 105, 103) and their RTX
-//                 for (const fmt of formats) {
-//                     if (['126', '127', '97', '98', '105', '106', '103', '104'].includes(fmt)) {
-//                         newVideoFormats.push(fmt);
-//                     }
-//                 }
-                
-//                 // Rebuild m= line with only H.264
-//                 lines[i] = parts.slice(0, 3).join(' ') + ' ' + newVideoFormats.join(' ');
-//                 break;
-//             }
-//         }
-        
-//         // Remove VP8, VP9, AV1 codec lines
-//         const filteredLines = lines.filter(line => {
-//             // Keep the line if it's not related to VP8 (120), VP9 (121), AV1 (99), or their RTX/FEC
-//             if (line.includes('rtpmap:120') || line.includes('rtpmap:124') ||
-//                 line.includes('rtpmap:121') || line.includes('rtpmap:125') ||
-//                 line.includes('rtpmap:99') || line.includes('rtpmap:100') ||
-//                 line.includes('rtpmap:123') || line.includes('rtpmap:122') ||
-//                 line.includes('rtpmap:119') ||
-//                 line.includes('fmtp:120') || line.includes('fmtp:124') ||
-//                 line.includes('fmtp:121') || line.includes('fmtp:125') ||
-//                 line.includes('fmtp:99') || line.includes('fmtp:100') ||
-//                 line.includes('fmtp:119') || line.includes('fmtp:122') ||
-//                 line.includes('rtcp-fb:120') || line.includes('rtcp-fb:121') ||
-//                 line.includes('rtcp-fb:99') || line.includes('rtcp-fb:123') ||
-//                 line.includes('rtcp-fb:122')) {
-//                 return false;
-//             }
-//             return true;
-//         });
-        
-//         offer.sdp = filteredLines.join('\r\n');
-        
-//         console.log('📤 Modified Offer SDP (H.264 only):', offer.sdp);
-        
-//         await pc.setLocalDescription(offer);
-//         console.log('Created offer, sending to server...');
-        
-//         // Send offer to Go server
-//         const response = await fetch('/offer', {
-//             method: 'POST',
-//             headers: { 'Content-Type': 'application/json' },
-//             body: JSON.stringify({
-//                 sdp: pc.localDescription.sdp,
-//                 type: pc.localDescription.type
-//             })
-//         });
-        
-//         if (!response.ok) {
-//             const error = await response.json();
-//             throw new Error(error.error || 'Failed to get answer');
-//         }
-        
-//         const answer = await response.json();
-        
-//         console.log('📥 REMOTE SDP (Answer):\n', answer.sdp);
-        
-//         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-//         console.log('Set remote description (answer)');
-        
-//         startMetricsCollection();
-        
-//         stopBtn.disabled = false;
-        
-//     } catch (error) {
-//         console.error('Error starting stream:', error);
-//         updateStatus('error', 'Error: ' + error.message);
-//         startBtn.disabled = false;
-//         stopStream();
-//     }
-// }
 
 /**
  * Stop the WebRTC stream
@@ -553,7 +350,9 @@ function processStats(stats) {
     const now = Date.now();
     
     stats.forEach(report => {
+        // Process video inbound-rtp stats
         if (report.type === 'inbound-rtp' && report.kind === 'video') {
+            // Calculate FPS
             if (lastStats && lastStats.framesReceived !== undefined) {
                 const timeDelta = (now - lastStatsTime) / 1000;
                 const framesDelta = report.framesReceived - lastStats.framesReceived;
@@ -561,6 +360,7 @@ function processStats(stats) {
                 updateMetric('fps', Math.round(fps));
             }
             
+            // Calculate bitrate
             if (lastStats && lastStats.bytesReceived !== undefined) {
                 const timeDelta = (now - lastStatsTime) / 1000;
                 const bytesDelta = report.bytesReceived - lastStats.bytesReceived;
@@ -568,9 +368,11 @@ function processStats(stats) {
                 updateMetric('bitrate', bitrate.toFixed(2));
             }
             
+            // Packet loss
             const packetsLost = report.packetsLost || 0;
             updateMetric('packetsLost', packetsLost);
             
+            // Jitter
             const jitter = report.jitter ? (report.jitter * 1000).toFixed(2) : 0;
             updateMetric('jitter', jitter);
             
@@ -579,6 +381,15 @@ function processStats(stats) {
                 bytesReceived: report.bytesReceived
             };
             lastStatsTime = now;
+        }
+        
+        // ✅ NEW: Process candidate-pair stats for latency (RTT)
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+            if (report.currentRoundTripTime !== undefined) {
+                // Convert from seconds to milliseconds
+                const latency = (report.currentRoundTripTime * 1000).toFixed(2);
+                updateMetric('latency', latency);
+            }
         }
     });
 }
@@ -593,6 +404,11 @@ function updateMetric(metric, value) {
         case 'fps':
             document.getElementById('fps-value').textContent = value;
             updateChart(fpsChart, timestamp, value);
+            break;
+            
+        case 'latency':
+            document.getElementById('latency-value').textContent = value;
+            updateChart(latencyChart, timestamp, value);
             break;
             
         case 'bitrate':
