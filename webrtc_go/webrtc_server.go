@@ -36,7 +36,7 @@ type Server struct {
 	receiversMu sync.RWMutex
 
 	// Tracks
-	videoTrack *webrtc.TrackLocalStaticRTP // FIXED: Changed from TrackLocalStaticSample
+	videoTrack *webrtc.TrackLocalStaticRTP
 
 	// Synchronization
 	mu              sync.Mutex
@@ -59,7 +59,7 @@ func NewServer(senderURL string) *Server {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	log.Println("New WebSocket connection from Python sender")
+	log.Println("📞 New WebSocket connection from Python sender")
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -68,14 +68,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	
-	// Configure WebSocket keepalive
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	// Configure WebSocket with longer read deadline
+	conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		return nil
 	})
 
-	// Start ping ticker for keepalive
+	// Start ping ticker for keepalive from server side
 	pingTicker := time.NewTicker(30 * time.Second)
 	defer pingTicker.Stop()
 	
@@ -87,7 +87,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	log.Println("✓ WebSocket connection established with sender")
+	log.Println("WebSocket connection established with sender")
 
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
@@ -115,13 +115,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	keyframeMutex := &sync.Mutex{}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("🎥 Received track from sender - Kind: %s, Codec: %s, PT: %d", 
+		log.Printf("Received track from sender - Kind: %s, Codec: %s, PT: %d", 
 			track.Kind(), track.Codec().MimeType, track.PayloadType())
 
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
-			log.Println("📹 Creating local video track for forwarding...")
+			log.Println("Creating local video track for forwarding...")
 
-			// Create TrackLocalStaticRTP (not TrackLocalStaticSample)
 			localTrack, err := webrtc.NewTrackLocalStaticRTP(
 				webrtc.RTPCodecCapability{
 					MimeType:    webrtc.MimeTypeVP8,
@@ -140,7 +139,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			s.videoTrack = localTrack
 			s.mu.Unlock()
 
-			log.Println("✓ Local video track created for VP8")
+			log.Println("Local video track created for VP8")
 
 			// Add track to all existing receivers
 			s.receiversMu.RLock()
@@ -226,11 +225,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 						log.Printf("Forwarded %d packets", packetCount)
 					}
 
-					// FIXED: Write RTP packet directly (not media.Sample)
+					// Write RTP packet
 					s.mu.Lock()
 					if s.videoTrack != nil {
 						if err := s.videoTrack.WriteRTP(rtpPacket); err != nil && err != io.ErrClosedPipe {
-							if packetCount%100 == 0 { // Only log occasionally
+							if packetCount%100 == 0 {
 								log.Printf("Error writing RTP: %v", err)
 							}
 						}
@@ -260,7 +259,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("🔗 Sender connection state: %s", state.String())
+		log.Printf("Sender connection state: %s", state.String())
 
 		if state == webrtc.PeerConnectionStateConnected {
 			log.Println("SENDER CONNECTED - Ready to receive video!")
@@ -273,12 +272,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Sender ICE state: %s", state.String())
 	})
 
-	// Handle signaling
+	// Handle signaling messages with ping/pong support
 	for {
 		var msg SignalMessage
 		
 		// Reset read deadline for each message
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		
 		err := conn.ReadJSON(&msg)
 		if err != nil {
@@ -314,7 +313,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Failed to set local description: %v", err)
 				continue
 			}
-			log.Println("✓ Local description (answer) set")
+			log.Println("Local description (answer) set")
 
 			response := SignalMessage{
 				Type: "answer",
@@ -336,6 +335,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					log.Println("Sender ICE candidate added")
 				}
 			}
+		
+		// WICHTIGG!!!! NEW: Handle ping messages
+		case "ping":
+			// Respond with pong to keep connection alive
+			pong := SignalMessage{Type: "pong"}
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteJSON(pong); err != nil {
+				log.Printf("Failed to send pong: %v", err)
+			}
 		}
 	}
 
@@ -346,11 +354,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.videoTrack = nil
 	s.mu.Unlock()
 
-	log.Println("🔌 Sender disconnected")
+	log.Println("Sender disconnected")
 }
 
 func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
-	log.Println("📞 Received offer from browser client")
+	log.Println("Received offer from browser client")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -389,7 +397,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("Parsed browser offer")
+	log.Println("✓ Parsed browser offer")
 
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
@@ -429,7 +437,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 								MediaSSRC: uint32(receiver.Track().SSRC()),
 							},
 						})
-						log.Println("Keyframe requested for new browser")
+						log.Println("📸 Keyframe requested for new browser")
 						break
 					}
 				}
@@ -444,7 +452,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 	})
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("Receiver %s ICE state: %s", receiverID, state.String())
+		log.Printf("🧊 Receiver %s ICE state: %s", receiverID, state.String())
 	})
 
 	// Add the video track
@@ -455,7 +463,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	log.Printf("✓ Video track added to receiver")
+	log.Printf("Video track added to receiver")
 
 	// Handle RTCP
 	go func() {
@@ -478,7 +486,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to set remote description", http.StatusInternalServerError)
 		return
 	}
-	log.Println("✓ Remote description set")
+	log.Println("Remote description set")
 
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
@@ -565,7 +573,7 @@ func main() {
 	separator := strings.Repeat("=", 60)
 
 	log.Println(separator)
-	log.Println("WebRTC Server Starting...")
+	log.Println("WebRTC Server with Keepalive Starting...")
 	log.Println(separator)
 	log.Printf("WebSocket endpoint: ws://localhost:%d/ws", httpPort)
 	log.Printf("Web interface: http://localhost:%d", httpPort)
@@ -580,6 +588,6 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", httpPort)
 	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatal("Server failed to start:", err)
+		log.Fatal("!! Server failed to start:", err)
 	}
 }
