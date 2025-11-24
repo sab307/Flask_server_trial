@@ -59,7 +59,7 @@ func NewServer(senderURL string) *Server {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	log.Println("📞 New WebSocket connection from Python sender")
+	log.Println("New WebSocket connection from Python sender")
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -242,7 +242,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
-			log.Println("✓ Sender ICE gathering complete")
+			log.Println("Sender ICE gathering complete")
 			return
 		}
 
@@ -300,7 +300,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Failed to set remote description: %v", err)
 				continue
 			}
-			log.Println("✓ Remote description (offer) set")
+			log.Println("Remote description (offer) set")
 
 			answer, err := pc.CreateAnswer(nil)
 			if err != nil {
@@ -397,7 +397,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("✓ Parsed browser offer")
+	log.Println("Parsed browser offer")
 
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
@@ -419,11 +419,11 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 	s.receivers[receiverID] = pc
 	s.receiversMu.Unlock()
 
-	log.Printf("✓ Receiver PeerConnection created (ID: %s)", receiverID)
+	log.Printf("Receiver PeerConnection created (ID: %s)", receiverID)
 
 	// Monitor connection
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("🔗 Receiver %s state: %s", receiverID, state.String())
+		log.Printf("Receiver %s state: %s", receiverID, state.String())
 
 		if state == webrtc.PeerConnectionStateConnected {
 			log.Printf("BROWSER %s CONNECTED!", receiverID)
@@ -437,7 +437,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 								MediaSSRC: uint32(receiver.Track().SSRC()),
 							},
 						})
-						log.Println("📸 Keyframe requested for new browser")
+						log.Println("Keyframe requested for new browser")
 						break
 					}
 				}
@@ -452,7 +452,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 	})
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("🧊 Receiver %s ICE state: %s", receiverID, state.String())
+		log.Printf("Receiver %s ICE state: %s", receiverID, state.String())
 	})
 
 	// Add the video track
