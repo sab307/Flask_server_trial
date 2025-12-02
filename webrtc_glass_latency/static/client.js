@@ -59,19 +59,24 @@ const timestampBuffer = new Map();
 const MAX_TIMESTAMP_BUFFER = 100;
 
 // =============================================================================
-// Clock synchronization - Currently for monitoring only
+// Clock synchronization - Two-stage offset calculation
 // =============================================================================
-// NOTE: Clock sync is performed but NOT applied to latency calculations because:
-// 1. Timestamps come from Python sender (not Go relay)
-// 2. Python and browser clocks are already synchronized (< 50ms difference)
-// 3. The 21-second offset is between Go relay and browser, not Python and browser
-// Clock sync is kept active for monitoring purposes.
+// System architecture:
+//   Python Sender (Computer A) → Go Relay (Computer A) → Browser (Computer B)
+//
+// We need to sync Python→Browser, but they don't communicate directly.
+// Solution: Calculate offset_python_browser = offset_python_go + offset_go_browser
+//
+// 1. offset_python_go: Estimated from relay_time_ms - send_time_ms
+// 2. offset_go_browser: Measured via ping/pong (this value)
+// 3. Total offset applied to latency calculations
 // =============================================================================
-let clockOffset = 0;
+let clockOffsetGoBrowser = 0;      // Go relay ↔ Browser offset (from ping/pong)
+let clockOffsetPythonBrowser = 0;  // Python sender → Browser offset (calculated)
 let clockSyncSamples = [];
-const CLOCK_SYNC_SAMPLES = 10;  // CHANGED: Increased from 5 to 10
-let clockSyncComplete = false;   // NEW: Track if initial sync is done
-let clockSyncInterval = null;    // NEW: Store interval ID for cleanup
+const CLOCK_SYNC_SAMPLES = 10;
+let clockSyncComplete = false;
+let clockSyncInterval = null;
 // =============================================================================
 
 // Latency statistics
@@ -101,6 +106,7 @@ function processTimestamp(data) {
             seq: data.seq,
             capture_ms: data.capture_ms,
             relay_ms: data.relay_time_ms || data.send_time_ms,
+            send_ms: data.send_time_ms,
             receive_ms: receiveTime,
             frame_num: data.frame_num
         });
@@ -112,16 +118,25 @@ function processTimestamp(data) {
         }
         
         // =================================================================
-        // FIX: Don't apply clock offset to Python timestamps
+        // Calculate Python→Browser offset using two-stage approach
         // =================================================================
-        // The clock offset is between Go relay and browser, but timestamps
-        // come from Python sender. Looking at the actual values:
-        //   receiveTime ≈ 1764676027287 (browser epoch ms)
-        //   capture_ms  ≈ 1764676027258 (Python epoch ms)
-        // These are only ~29ms apart, showing Python and browser clocks
-        // are already synchronized! The 21-second offset is between Go
-        // relay and browser, which shouldn't be applied here.
-        const networkLatency = receiveTime - data.capture_ms;
+        // offset_python_go: Difference between Python and Go relay clocks
+        //   - relay_time_ms: Go's timestamp when it received the message
+        //   - send_time_ms: Python's timestamp when it sent the message
+        //   - Difference represents clock skew between machines
+        const offsetPythonGo = (data.relay_time_ms || data.send_time_ms) - data.send_time_ms;
+        
+        // offset_python_browser: Total offset from Python to Browser
+        //   = offset_python_go + offset_go_browser
+        clockOffsetPythonBrowser = offsetPythonGo + clockOffsetGoBrowser;
+        
+        // Debug: Log offset calculation every 60 frames (~2 seconds at 30fps)
+        if (data.frame_num % 60 === 0) {
+            console.log(`🔧 Offset calc: Python→Go=${offsetPythonGo.toFixed(2)}ms + Go→Browser=${clockOffsetGoBrowser.toFixed(2)}ms = Total=${clockOffsetPythonBrowser.toFixed(2)}ms`);
+        }
+        
+        // Apply the full Python→Browser offset
+        const networkLatency = receiveTime - data.capture_ms + clockOffsetPythonBrowser;
         // =================================================================
         
         // Update current latency estimate (with sanity check)
@@ -129,7 +144,7 @@ function processTimestamp(data) {
             updateGlassLatency(networkLatency);
         } else {
             if (data.frame_num % 30 === 0) {  // Log every 30 frames
-                console.warn(`⚠️ Invalid latency: ${networkLatency.toFixed(1)}ms (receiveTime=${receiveTime.toFixed(0)}, capture=${data.capture_ms?.toFixed(0)}, offset=${clockOffset.toFixed(2)})`);
+                console.warn(`⚠️ Invalid latency: ${networkLatency.toFixed(1)}ms (receiveTime=${receiveTime.toFixed(0)}, capture=${data.capture_ms?.toFixed(0)}, offset_total=${clockOffsetPythonBrowser.toFixed(2)})`);
             }
         }
     } else if (data.type === 'pong') {
@@ -185,22 +200,23 @@ function processClockSync(data) {
         // Warn if offset is abnormally large (for monitoring)
         // =============================================================
         if (Math.abs(newOffset) > 5000 && !clockSyncComplete) {
-            console.warn(`⚠️ Clock offset between Go relay and browser: ${newOffset.toFixed(2)}ms (${(newOffset/1000).toFixed(1)}s)`);
-            console.warn(`   This is normal if relay and browser are on different machines.`);
-            console.warn(`   Latency measurements use Python→Browser sync, not affected by this offset.`);
+            console.warn(`⚠️ Clock offset (Go relay ↔ Browser): ${newOffset.toFixed(2)}ms (${(newOffset/1000).toFixed(1)}s)`);
+            console.warn(`   This is expected when accessing from a different machine.`);
+            console.warn(`   Two-stage sync will compensate: Python→Go + Go→Browser`);
         }
         // =============================================================
         
-        clockOffset = newOffset;
+        clockOffsetGoBrowser = newOffset;
         
         // =============================================================
         // NEW: Mark sync as complete after collecting enough samples
         // =============================================================
         if (clockSyncSamples.length >= CLOCK_SYNC_SAMPLES && !clockSyncComplete) {
             clockSyncComplete = true;
-            console.log(`✅ Clock sync complete (relay↔browser): offset=${clockOffset.toFixed(2)}ms - for monitoring only`);
+            console.log(`✅ Clock sync complete (Go↔Browser): ${clockOffsetGoBrowser.toFixed(2)}ms`);
+            console.log(`   Python→Browser offset will be calculated from relay timestamps`);
         } else {
-            console.log(`🕐 Clock sync (relay↔browser): offset=${clockOffset.toFixed(2)}ms, RTT=${rtt.toFixed(2)}ms (${clockSyncSamples.length}/${CLOCK_SYNC_SAMPLES})`);
+            console.log(`🕐 Clock sync (Go↔Browser): offset=${clockOffsetGoBrowser.toFixed(2)}ms, RTT=${rtt.toFixed(2)}ms (${clockSyncSamples.length}/${CLOCK_SYNC_SAMPLES})`);
         }
         // =============================================================
     }
@@ -890,8 +906,8 @@ function stopDurationTimer() {
 // =============================================================================
 
 window.addEventListener('DOMContentLoaded', async () => {
-    console.log('🚀 Glass-to-Glass Latency Measurement Client (Python→Browser direct sync)');
-    console.log('   Note: Clock sync with Go relay is for monitoring only');
+    console.log('🚀 Glass-to-Glass Latency Measurement Client (Two-Stage Clock Sync)');
+    console.log('   Python→Go→Browser offset compensation for multi-machine setups');
     
     initializeCharts();
     
