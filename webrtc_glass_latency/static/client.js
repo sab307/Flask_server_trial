@@ -147,8 +147,16 @@ function processTimestamp(data) {
             // SCENARIO 1: Large clock offset detected (e.g., 22 seconds)
             // =============================================================
             // Calculate Python→Browser offset using two-stage approach
+            // 
+            // offsetPythonGo = relay_time - send_time (Go ahead of Python)
+            // offsetGoBrowser = Go - Browser (from ping/pong)
+            // 
+            // To get Python→Browser offset:
+            // Python - Browser = -(Go - Python) + (Go - Browser)
+            //                  = -offsetPythonGo + offsetGoBrowser
+            //
             const offsetPythonGo = (data.relay_time_ms || data.send_time_ms) - data.send_time_ms;
-            clockOffsetPythonBrowser = offsetPythonGo + clockOffsetGoBrowser;
+            clockOffsetPythonBrowser = clockOffsetGoBrowser - offsetPythonGo;
             
             // Apply compensation
             networkLatency = rawLatency + clockOffsetPythonBrowser;
@@ -157,7 +165,8 @@ function processTimestamp(data) {
             // Debug logging every 60 frames (~2 seconds at 30fps)
             if (data.frame_num % 60 === 0) {
                 console.log(`🔧 Clock skew detected! Raw=${rawLatency.toFixed(0)}ms`);
-                console.log(`   Offset: Python→Go=${offsetPythonGo.toFixed(2)}ms + Go→Browser=${clockOffsetGoBrowser.toFixed(2)}ms = ${clockOffsetPythonBrowser.toFixed(2)}ms`);
+                console.log(`   Python→Go=${offsetPythonGo.toFixed(2)}ms, Go→Browser=${clockOffsetGoBrowser.toFixed(2)}ms`);
+                console.log(`   Total offset: ${clockOffsetPythonBrowser.toFixed(2)}ms`);
                 console.log(`   Compensated latency: ${networkLatency.toFixed(1)}ms`);
             }
         } else {
@@ -853,6 +862,9 @@ function processStats(stats) {
             if (report.currentRoundTripTime !== undefined && report.currentRoundTripTime > 0) {
                 const rtt = (report.currentRoundTripTime * 1000).toFixed(2);
                 updateMetric('latency', rtt);
+            } else if (report.currentRoundTripTime === 0) {
+                // Localhost or same machine - RTT is effectively 0
+                updateMetric('latency', '< 1');
             }
         }
     });
