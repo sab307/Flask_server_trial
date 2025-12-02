@@ -63,7 +63,7 @@ const MAX_TIMESTAMP_BUFFER = 100;
 // Clock synchronization - accounts for clock difference between sender and receiver
 let clockOffset = 0;  // Difference between sender and receiver clocks (ms)
 let clockSyncSamples = [];
-const CLOCK_SYNC_SAMPLES = 5;
+const CLOCK_SYNC_SAMPLES = 10;
 
 // Latency statistics
 let latencyStats = {
@@ -143,7 +143,7 @@ function processTimestamp(data) {
         
         // Calculate latency using most recent timestamp
         // This gives us network + processing latency (not including display)
-        const networkLatency = receiveTime - data.capture_ms - clockOffset;
+        const networkLatency = receiveTime - data.capture_ms + clockOffset;
         
         // Debug logging
         console.log(`📊 Network latency: ${networkLatency.toFixed(1)}ms (receiveTime=${receiveTime.toFixed(0)}, capture=${data.capture_ms?.toFixed(0)}, offset=${clockOffset.toFixed(2)})`);
@@ -169,6 +169,37 @@ function processTimestamp(data) {
 // END OF NEW processTimestamp
 // =============================================================================
 
+// New code clock sync issues resolve attempt
+function processClockSync(data) {
+    const receiveTime = performance.now() + performance.timeOrigin;
+    const rtt = receiveTime - data.client_time;
+    const oneWayDelay = rtt / 2;
+    
+    const offset = data.server_time + oneWayDelay - receiveTime;
+    
+    clockSyncSamples.push({
+        offset: offset,
+        rtt: rtt
+    });
+    
+    if (clockSyncSamples.length > CLOCK_SYNC_SAMPLES) {
+        clockSyncSamples.shift();
+    }
+    
+    // Use median offset
+    if (clockSyncSamples.length >= 3) {
+        const offsets = clockSyncSamples.map(s => s.offset).sort((a, b) => a - b);
+        const newOffset = offsets[Math.floor(offsets.length / 2)];
+        
+        // ADD: Warn if offset is unusually large
+        if (Math.abs(newOffset) > 1000) {
+            console.warn(`⚠️ Large clock offset detected: ${newOffset.toFixed(2)}ms - check NTP sync!`);
+        }
+        
+        clockOffset = newOffset;
+        console.log(`Clock offset: ${clockOffset.toFixed(2)}ms (RTT: ${rtt.toFixed(2)}ms)`);
+    }
+} // New code trying to resolve clock sync issues
 
 // =============================================================================
 // NEW: Process clock synchronization pong
