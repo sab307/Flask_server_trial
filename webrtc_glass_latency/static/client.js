@@ -14,6 +14,15 @@
  * 5. Added latencyStats object to track min/max/avg latency
  * 6. Added glassLatencyChart for displaying latency over time
  * 7. Added updateGlassLatency function to calculate and display latency
+ * 
+ * =============================================================================
+ * CLOCK SYNC FIXES APPLIED (Latest):
+ * =============================================================================
+ * 8. FIXED: Corrected sign in networkLatency calculation (+ instead of -)
+ * 9. IMPROVED: Better clock synchronization with rapid initial sampling
+ * 10. IMPROVED: Outlier rejection for clock sync samples
+ * 11. IMPROVED: Only measure latency after clock sync completes
+ * 12. IMPROVED: Warnings for large clock offsets
  * =============================================================================
  */
 
@@ -22,12 +31,7 @@
 // =============================================================================
 
 let pc = null;
-// =============================================================================
-// NEW: DataChannel for receiving timestamps
-// =============================================================================
-// PREVIOUS (in client.js): (not present)
-let timestampChannel = null;  // NEW: DataChannel for timestamps
-// =============================================================================
+let timestampChannel = null;
 let metricsInterval = null;
 let durationInterval = null;
 let connectionStartTime = null;
@@ -37,12 +41,7 @@ let fpsChart = null;
 let latencyChart = null;
 let bitrateChart = null;
 let packetLossChart = null;
-// =============================================================================
-// NEW: Glass-to-glass latency chart
-// =============================================================================
-// PREVIOUS (in client.js): (not present)
-let glassLatencyChart = null;  // NEW: Glass-to-glass latency chart
-// =============================================================================
+let glassLatencyChart = null;
 
 // Metrics history
 const MAX_HISTORY = 60;
@@ -52,18 +51,22 @@ let lastStats = null;
 let lastStatsTime = null;
 
 // =============================================================================
-// NEW: Glass-to-Glass Latency Measurement Variables
+// Glass-to-Glass Latency Measurement Variables
 // =============================================================================
-// PREVIOUS (in client.js): (none of these were present)
 
 // Timestamp correlation - stores timestamps received via DataChannel
-const timestampBuffer = new Map();  // seq -> {capture_ms, relay_ms, receive_ms}
+const timestampBuffer = new Map();
 const MAX_TIMESTAMP_BUFFER = 100;
 
-// Clock synchronization - accounts for clock difference between sender and receiver
-let clockOffset = 0;  // Difference between sender and receiver clocks (ms)
+// =============================================================================
+// IMPROVED: Clock synchronization with better validation
+// =============================================================================
+let clockOffset = 0;
 let clockSyncSamples = [];
-const CLOCK_SYNC_SAMPLES = 10;
+const CLOCK_SYNC_SAMPLES = 10;  // CHANGED: Increased from 5 to 10
+let clockSyncComplete = false;   // NEW: Track if initial sync is done
+let clockSyncInterval = null;    // NEW: Store interval ID for cleanup
+// =============================================================================
 
 // Latency statistics
 let latencyStats = {
@@ -79,53 +82,14 @@ let frameCallbackId = null;
 let lastFrameTime = 0;
 let frameCount = 0;
 
-// END OF NEW Variables
-// =============================================================================
-
 
 // =============================================================================
-// NEW: Process received timestamp from DataChannel
+// IMPROVED: Process received timestamp from DataChannel
 // =============================================================================
-// PREVIOUS (in client.js): (not present)
-//
-// NEW: Function to handle incoming timestamp messages
 function processTimestamp(data) {
     const receiveTime = performance.now() + performance.timeOrigin;
     
     if (data.type === 'frame_timestamp') {
-        // =================================================================
-        // PREVIOUS CODE (no debug logging):
-        // =================================================================
-        // // Store timestamp for correlation with displayed frames
-        // timestampBuffer.set(data.frame_num, {
-        //     seq: data.seq,
-        //     capture_ms: data.capture_ms,
-        //     relay_ms: data.relay_time_ms || data.send_time_ms,
-        //     receive_ms: receiveTime,
-        //     frame_num: data.frame_num
-        // });
-        // 
-        // // Cleanup old entries to prevent memory leak
-        // if (timestampBuffer.size > MAX_TIMESTAMP_BUFFER) {
-        //     const oldestKey = timestampBuffer.keys().next().value;
-        //     timestampBuffer.delete(oldestKey);
-        // }
-        // 
-        // // Calculate latency using most recent timestamp
-        // const networkLatency = receiveTime - data.capture_ms - clockOffset;
-        // 
-        // // Update current latency estimate (with sanity check)
-        // if (networkLatency > 0 && networkLatency < 5000) {
-        //     updateGlassLatency(networkLatency);
-        // }
-        // =================================================================
-        
-        // =================================================================
-        // NEW CODE (with debug logging):
-        // =================================================================
-        // Debug logging
-        console.log(`📡 Timestamp received: frame=${data.frame_num}, capture=${data.capture_ms?.toFixed(0)}, clockOffset=${clockOffset.toFixed(2)}`);
-        
         // Store timestamp for correlation with displayed frames
         timestampBuffer.set(data.frame_num, {
             seq: data.seq,
@@ -141,72 +105,42 @@ function processTimestamp(data) {
             timestampBuffer.delete(oldestKey);
         }
         
-        // Calculate latency using most recent timestamp
-        // This gives us network + processing latency (not including display)
-        const networkLatency = receiveTime - data.capture_ms + clockOffset;
+        // =================================================================
+        // NEW: Only process latency after clock sync is complete
+        // =================================================================
+        if (!clockSyncComplete) {
+            if (timestampBuffer.size === 1 || data.frame_num % 30 === 0) {
+                console.warn(`⏳ Waiting for clock sync to complete (${clockSyncSamples.length}/${CLOCK_SYNC_SAMPLES} samples)`);
+            }
+            return;
+        }
+        // =================================================================
         
-        // Debug logging
-        console.log(`📊 Network latency: ${networkLatency.toFixed(1)}ms (receiveTime=${receiveTime.toFixed(0)}, capture=${data.capture_ms?.toFixed(0)}, offset=${clockOffset.toFixed(2)})`);
+        // =================================================================
+        // FIXED: Correct sign - use + instead of -
+        // =================================================================
+        // BEFORE: const networkLatency = receiveTime - data.capture_ms - clockOffset;
+        // AFTER:
+        const networkLatency = receiveTime - data.capture_ms + clockOffset;
+        // =================================================================
         
         // Update current latency estimate (with sanity check)
         if (networkLatency > 0 && networkLatency < 5000) {
             updateGlassLatency(networkLatency);
         } else {
-            console.warn(`⚠️ Invalid latency: ${networkLatency.toFixed(1)}ms - clock may not be synced yet`);
+            if (data.frame_num % 30 === 0) {  // Log every 30 frames
+                console.warn(`⚠️ Invalid latency: ${networkLatency.toFixed(1)}ms (receiveTime=${receiveTime.toFixed(0)}, capture=${data.capture_ms?.toFixed(0)}, offset=${clockOffset.toFixed(2)})`);
+            }
         }
-        // =================================================================
     } else if (data.type === 'pong') {
-        // Clock sync response from server
-        // =================================================================
-        // PREVIOUS CODE: processClockSync(data);
-        // NEW CODE (with logging):
-        // =================================================================
-        console.log(`🕐 Clock sync pong received`);
         processClockSync(data);
-        // =================================================================
     }
 }
-// END OF NEW processTimestamp
-// =============================================================================
 
-// New code clock sync issues resolve attempt
-function processClockSync(data) {
-    const receiveTime = performance.now() + performance.timeOrigin;
-    const rtt = receiveTime - data.client_time;
-    const oneWayDelay = rtt / 2;
-    
-    const offset = data.server_time + oneWayDelay - receiveTime;
-    
-    clockSyncSamples.push({
-        offset: offset,
-        rtt: rtt
-    });
-    
-    if (clockSyncSamples.length > CLOCK_SYNC_SAMPLES) {
-        clockSyncSamples.shift();
-    }
-    
-    // Use median offset
-    if (clockSyncSamples.length >= 3) {
-        const offsets = clockSyncSamples.map(s => s.offset).sort((a, b) => a - b);
-        const newOffset = offsets[Math.floor(offsets.length / 2)];
-        
-        // ADD: Warn if offset is unusually large
-        if (Math.abs(newOffset) > 1000) {
-            console.warn(`⚠️ Large clock offset detected: ${newOffset.toFixed(2)}ms - check NTP sync!`);
-        }
-        
-        clockOffset = newOffset;
-        console.log(`Clock offset: ${clockOffset.toFixed(2)}ms (RTT: ${rtt.toFixed(2)}ms)`);
-    }
-} // New code trying to resolve clock sync issues
 
 // =============================================================================
-// NEW: Process clock synchronization pong
+// IMPROVED: Process clock synchronization with outlier rejection
 // =============================================================================
-// PREVIOUS (in client.js): (not present)
-//
-// NEW: Calculate clock offset between sender and receiver
 function processClockSync(data) {
     const receiveTime = performance.now() + performance.timeOrigin;
     const rtt = receiveTime - data.client_time;
@@ -215,122 +149,124 @@ function processClockSync(data) {
     // Calculate clock offset: server_time + one_way_delay should equal our receive_time
     const offset = data.server_time + oneWayDelay - receiveTime;
     
+    // =================================================================
+    // NEW: Reject outliers (RTT > 500ms suggests network issues)
+    // =================================================================
+    if (rtt > 500) {
+        console.warn(`⚠️ Rejecting clock sync sample - high RTT: ${rtt.toFixed(2)}ms`);
+        return;
+    }
+    // =================================================================
+    
     clockSyncSamples.push({
         offset: offset,
-        rtt: rtt
+        rtt: rtt,
+        timestamp: receiveTime
     });
     
     // Keep only recent samples
-    if (clockSyncSamples.length > CLOCK_SYNC_SAMPLES) {
+    if (clockSyncSamples.length > CLOCK_SYNC_SAMPLES * 2) {
         clockSyncSamples.shift();
     }
     
-    // Use median offset (more robust than mean)
+    // =================================================================
+    // IMPROVED: Use median offset from samples with lowest RTT
+    // =================================================================
     if (clockSyncSamples.length >= 3) {
-        const offsets = clockSyncSamples.map(s => s.offset).sort((a, b) => a - b);
-        clockOffset = offsets[Math.floor(offsets.length / 2)];
-        console.log(`Clock offset: ${clockOffset.toFixed(2)}ms (RTT: ${rtt.toFixed(2)}ms)`);
+        // Sort by RTT and take the best 50% of samples
+        const sortedByRTT = [...clockSyncSamples].sort((a, b) => a.rtt - b.rtt);
+        const bestSamples = sortedByRTT.slice(0, Math.ceil(sortedByRTT.length / 2));
+        
+        // Calculate median offset from best samples
+        const offsets = bestSamples.map(s => s.offset).sort((a, b) => a - b);
+        const newOffset = offsets[Math.floor(offsets.length / 2)];
+        
+        // =============================================================
+        // NEW: Warn if offset is abnormally large
+        // =============================================================
+        if (Math.abs(newOffset) > 5000 && !clockSyncComplete) {
+            console.warn(`⚠️ Large clock offset detected: ${newOffset.toFixed(2)}ms (${(newOffset/1000).toFixed(1)} seconds)`);
+            console.warn(`   This suggests system clocks are out of sync. Consider enabling NTP.`);
+            console.warn(`   Latency measurements will still work but may be less accurate.`);
+        }
+        // =============================================================
+        
+        clockOffset = newOffset;
+        
+        // =============================================================
+        // NEW: Mark sync as complete after collecting enough samples
+        // =============================================================
+        if (clockSyncSamples.length >= CLOCK_SYNC_SAMPLES && !clockSyncComplete) {
+            clockSyncComplete = true;
+            console.log(`✅ Clock sync complete: offset=${clockOffset.toFixed(2)}ms (from ${bestSamples.length} best samples)`);
+        } else {
+            console.log(`🕐 Clock sync: offset=${clockOffset.toFixed(2)}ms, RTT=${rtt.toFixed(2)}ms (${clockSyncSamples.length}/${CLOCK_SYNC_SAMPLES} samples)`);
+        }
+        // =============================================================
     }
 }
-// END OF NEW processClockSync
-// =============================================================================
 
 
 // =============================================================================
-// NEW: Send clock sync ping via DataChannel
+// Send clock sync ping via DataChannel
 // =============================================================================
-// PREVIOUS (in client.js): (not present)
-//
-// NEW: Send ping to server for clock synchronization
 function sendClockSyncPing() {
-    // =========================================================================
-    // PREVIOUS CODE (no debug logging):
-    // =========================================================================
-    // if (timestampChannel && timestampChannel.readyState === 'open') {
-    //     const ping = {
-    //         type: 'ping',
-    //         client_time: performance.now() + performance.timeOrigin
-    //     };
-    //     timestampChannel.send(JSON.stringify(ping));
-    // }
-    // =========================================================================
-    
-    // =========================================================================
-    // NEW CODE (with debug logging):
-    // =========================================================================
     if (timestampChannel && timestampChannel.readyState === 'open') {
         const ping = {
             type: 'ping',
             client_time: performance.now() + performance.timeOrigin
         };
-        console.log(`🕐 Sending clock sync ping: client_time=${ping.client_time.toFixed(0)}`);
         timestampChannel.send(JSON.stringify(ping));
     } else {
         console.warn(`⚠️ Cannot send clock sync - DataChannel state: ${timestampChannel?.readyState}`);
     }
-    // =========================================================================
 }
-// END OF NEW sendClockSyncPing
-// =============================================================================
 
 
 // =============================================================================
-// NEW: Update glass-to-glass latency display
+// NEW: Start clock sync with rapid initial sampling
 // =============================================================================
-// PREVIOUS (in client.js): (not present)
-//
-// NEW: Calculate statistics and update UI
-function updateGlassLatency(latencyMs) {
-    // =========================================================================
-    // PREVIOUS CODE (minimal implementation):
-    // =========================================================================
-    // // Sanity check
-    // if (latencyMs < 0 || latencyMs > 10000) return;
-    // 
-    // latencyStats.current = latencyMs;
-    // latencyStats.samples.push(latencyMs);
-    // 
-    // // Keep last 30 samples
-    // if (latencyStats.samples.length > 30) {
-    //     latencyStats.samples.shift();
-    // }
-    // 
-    // // Calculate statistics
-    // latencyStats.min = Math.min(latencyStats.min, latencyMs);
-    // latencyStats.max = Math.max(latencyStats.max, latencyMs);
-    // latencyStats.avg = latencyStats.samples.reduce((a, b) => a + b, 0) / latencyStats.samples.length;
-    // 
-    // // Update display elements
-    // const glassLatencyEl = document.getElementById('glass-latency-value');
-    // if (glassLatencyEl) {
-    //     glassLatencyEl.textContent = latencyMs.toFixed(1);
-    // }
-    // 
-    // const glassLatencyMinEl = document.getElementById('glass-latency-min');
-    // if (glassLatencyMinEl) {
-    //     glassLatencyMinEl.textContent = latencyStats.min.toFixed(1);
-    // }
-    // 
-    // const glassLatencyMaxEl = document.getElementById('glass-latency-max');
-    // if (glassLatencyMaxEl) {
-    //     glassLatencyMaxEl.textContent = latencyStats.max.toFixed(1);
-    // }
-    // 
-    // const glassLatencyAvgEl = document.getElementById('glass-latency-avg');
-    // if (glassLatencyAvgEl) {
-    //     glassLatencyAvgEl.textContent = latencyStats.avg.toFixed(1);
-    // }
-    // 
-    // // Update chart
-    // if (glassLatencyChart) {
-    //     const timestamp = new Date().toLocaleTimeString();
-    //     updateChart(glassLatencyChart, timestamp, latencyMs);
-    // }
-    // =========================================================================
+function startClockSync() {
+    // Stop any existing sync
+    stopClockSync();
     
-    // =========================================================================
-    // NEW CODE (with debug logging and element warnings):
-    // =========================================================================
+    // Reset sync state
+    clockSyncSamples = [];
+    clockSyncComplete = false;
+    
+    console.log('🕐 Starting rapid clock synchronization...');
+    
+    // Send initial burst of pings for fast convergence
+    let burstCount = 0;
+    const burstInterval = setInterval(() => {
+        sendClockSyncPing();
+        burstCount++;
+        
+        if (burstCount >= CLOCK_SYNC_SAMPLES) {
+            clearInterval(burstInterval);
+            // Then switch to periodic sync every 5 seconds
+            console.log('🕐 Initial burst complete, switching to periodic sync');
+            clockSyncInterval = setInterval(sendClockSyncPing, 5000);
+        }
+    }, 200);  // Send 10 samples in 2 seconds
+}
+
+
+// =============================================================================
+// NEW: Stop clock synchronization
+// =============================================================================
+function stopClockSync() {
+    if (clockSyncInterval) {
+        clearInterval(clockSyncInterval);
+        clockSyncInterval = null;
+    }
+}
+
+
+// =============================================================================
+// Update glass-to-glass latency display
+// =============================================================================
+function updateGlassLatency(latencyMs) {
     // Sanity check
     if (latencyMs < 0 || latencyMs > 10000) {
         console.warn(`⚠️ Glass latency out of range: ${latencyMs.toFixed(1)}ms`);
@@ -359,8 +295,6 @@ function updateGlassLatency(latencyMs) {
     const glassLatencyEl = document.getElementById('glass-latency-value');
     if (glassLatencyEl) {
         glassLatencyEl.textContent = latencyMs.toFixed(1);
-    } else {
-        console.warn('⚠️ glass-latency-value element not found');
     }
     
     const glassLatencyMinEl = document.getElementById('glass-latency-min');
@@ -383,18 +317,12 @@ function updateGlassLatency(latencyMs) {
         const timestamp = new Date().toLocaleTimeString();
         updateChart(glassLatencyChart, timestamp, latencyMs);
     }
-    // =========================================================================
 }
-// END OF NEW updateGlassLatency
-// =============================================================================
 
 
 // =============================================================================
-// NEW: Setup requestVideoFrameCallback for precise frame timing
+// Setup requestVideoFrameCallback for precise frame timing
 // =============================================================================
-// PREVIOUS (in client.js): (not present)
-//
-// NEW: Use Video Frame Callback API for frame-accurate timing
 function setupFrameCallback(video) {
     if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) {
         console.warn('requestVideoFrameCallback not supported');
@@ -404,16 +332,8 @@ function setupFrameCallback(video) {
     const frameCallback = (now, metadata) => {
         frameCount++;
         
-        // metadata contains:
-        // - presentationTime: when the frame was presented
-        // - expectedDisplayTime: when it should be displayed
-        // - mediaTime: media timeline position
-        // - presentedFrames: total frames presented
-        
         if (metadata.presentationTime) {
             const displayTime = metadata.presentationTime;
-            
-            // Try to correlate with a timestamp from buffer
             const approxFrameNum = metadata.presentedFrames || frameCount;
             
             // Look for matching timestamp in buffer (with some tolerance)
@@ -421,7 +341,7 @@ function setupFrameCallback(video) {
                 if (Math.abs(frameNum - approxFrameNum) < 5) {
                     // Calculate glass-to-glass latency
                     const captureTime = tsData.capture_ms;
-                    const adjustedCaptureTime = captureTime + clockOffset;
+                    const adjustedCaptureTime = captureTime + clockOffset;  // FIXED: + not -
                     const displayTimeMs = displayTime;
                     
                     const glassLatency = displayTimeMs - adjustedCaptureTime;
@@ -446,14 +366,11 @@ function setupFrameCallback(video) {
     frameCallbackId = video.requestVideoFrameCallback(frameCallback);
     console.log('✅ requestVideoFrameCallback enabled for precise frame timing');
 }
-// END OF NEW setupFrameCallback
-// =============================================================================
 
 
 // =============================================================================
 // Chart Initialization
 // =============================================================================
-// CHANGED: Added glassLatencyChart initialization
 
 function initializeCharts() {
     const chartConfig = (label, color, yAxisLabel) => ({
@@ -533,10 +450,6 @@ function initializeCharts() {
         chartConfig('Packet Loss', '#F44336', 'Packets')
     );
     
-    // =========================================================================
-    // NEW: Initialize glass-to-glass latency chart
-    // =========================================================================
-    // PREVIOUS (in client.js): (not present)
     const glassChartEl = document.getElementById('glass-latency-chart');
     if (glassChartEl) {
         glassLatencyChart = new Chart(
@@ -544,7 +457,6 @@ function initializeCharts() {
             chartConfig('Glass-to-Glass Latency', '#9C27B0', 'ms')
         );
     }
-    // =========================================================================
 }
 
 function updateChart(chart, label, value) {
@@ -568,10 +480,10 @@ function updateStatus(status, message) {
     if (text) text.textContent = message;
 }
 
+
 // =============================================================================
 // WebRTC Stream Management
 // =============================================================================
-// CHANGED: Added DataChannel handling and latency measurement setup
 
 async function startStream() {
     const startBtn = document.getElementById('start-btn');
@@ -581,14 +493,14 @@ async function startStream() {
         startBtn.disabled = true;
         updateStatus('connecting', 'Connecting...');
         
-        // =====================================================================
-        // NEW: Reset latency stats on new connection
-        // =====================================================================
-        // PREVIOUS (in client.js): (not present)
+        // =================================================================
+        // IMPROVED: Reset all latency measurement state
+        // =================================================================
         latencyStats = { samples: [], min: Infinity, max: 0, avg: 0, current: 0 };
         clockSyncSamples = [];
+        clockSyncComplete = false;  // ADDED: Reset sync completion flag
         timestampBuffer.clear();
-        // =====================================================================
+        // =================================================================
         
         pc = new RTCPeerConnection({
             iceServers: [
@@ -602,43 +514,22 @@ async function startStream() {
         
         console.log('✅ RTCPeerConnection created');
         
-        // =====================================================================
-        // NEW: Handle DataChannel for timestamps
-        // =====================================================================
-        // PREVIOUS (in client.js): (not present - no DataChannel handling)
-        //
-        // =============================================================
-        // PREVIOUS APPROACH (server creates DataChannel - DIDN'T WORK):
-        // =============================================================
-        // The server created DataChannel after receiving offer, but this
-        // caused DataChannel to stay in "connecting" state forever because
-        // it wasn't included in the SDP negotiation.
-        //
-        // pc.ondatachannel = (event) => {
-        //     if (event.channel.label === 'timestamps') {
-        //         timestampChannel = event.channel;
-        //         // ... handlers
-        //     }
-        // };
-        // =============================================================
-        
-        // =============================================================
-        // NEW APPROACH: Browser creates DataChannel (included in offer)
-        // =============================================================
-        // Browser creates DataChannel BEFORE creating offer, so it's
-        // included in the SDP. Server receives it via ondatachannel.
+        // =================================================================
+        // DataChannel Setup
+        // =================================================================
         timestampChannel = pc.createDataChannel('timestamps', {
             ordered: true
         });
         console.log('📡 Created DataChannel: timestamps');
         
+        // =================================================================
+        // IMPROVED: Use startClockSync() for better initialization
+        // =================================================================
         timestampChannel.onopen = () => {
             console.log('📡 Timestamp DataChannel OPEN - starting clock sync');
-            
-            // Start clock synchronization
-            sendClockSyncPing();
-            setInterval(sendClockSyncPing, 5000);  // Sync every 5 seconds
+            startClockSync();  // CHANGED: Use new rapid sync function
         };
+        // =================================================================
         
         timestampChannel.onclose = () => {
             console.log('📡 Timestamp DataChannel CLOSED');
@@ -650,26 +541,12 @@ async function startStream() {
         
         timestampChannel.onmessage = (event) => {
             try {
-                // =========================================================
-                // PREVIOUS CODE (assumed string data):
-                // =========================================================
-                // const data = JSON.parse(event.data);
-                // processTimestamp(data);
-                // =========================================================
-                
-                // =========================================================
-                // NEW CODE (handle both string and binary data):
-                // =========================================================
-                // DataChannel can receive either string (text) or ArrayBuffer (binary)
-                // Go's SendText() sends string, Send() sends binary
                 let jsonString;
                 if (typeof event.data === 'string') {
                     jsonString = event.data;
                 } else if (event.data instanceof ArrayBuffer) {
-                    // Convert ArrayBuffer to string
                     jsonString = new TextDecoder().decode(event.data);
                 } else if (event.data instanceof Blob) {
-                    // Handle Blob (shouldn't happen but just in case)
                     console.warn('Received Blob data, converting...');
                     event.data.text().then(text => {
                         const data = JSON.parse(text);
@@ -683,14 +560,10 @@ async function startStream() {
                 
                 const data = JSON.parse(jsonString);
                 processTimestamp(data);
-                // =========================================================
             } catch (e) {
                 console.error('Failed to parse timestamp:', e, 'Raw data:', event.data);
             }
         };
-        // =============================================================
-        // END OF NEW DataChannel handling
-        // =====================================================================
         
         pc.onconnectionstatechange = () => {
             console.log('Connection state:', pc.connectionState);
@@ -698,7 +571,6 @@ async function startStream() {
             if (stateEl) stateEl.textContent = pc.connectionState;
             
             if (pc.connectionState === 'connected') {
-                // CHANGED: Updated status message
                 updateStatus('connected', '✓ Connected - Measuring Glass-to-Glass Latency');
                 const overlay = document.getElementById('video-overlay');
                 if (overlay) overlay.style.display = 'block';
@@ -727,29 +599,13 @@ async function startStream() {
                 
                 video.onloadedmetadata = () => {
                     const resolution = `${video.videoWidth}x${video.videoHeight}`;
-                    // =============================================================
-                    // PREVIOUS CODE (single element update):
-                    // =============================================================
-                    // const resEl = document.getElementById('resolution-value');
-                    // if (resEl) resEl.textContent = resolution;
-                    // =============================================================
-                    
-                    // =============================================================
-                    // NEW CODE (update both sidebar and overlay):
-                    // =============================================================
                     const resEl = document.getElementById('resolution-value');
                     const overlayResEl = document.getElementById('overlay-resolution');
                     if (resEl) resEl.textContent = resolution;
                     if (overlayResEl) overlayResEl.textContent = resolution;
-                    // =============================================================
                     console.log('✅ Video metadata:', resolution);
                     
-                    // =============================================================
-                    // NEW: Setup precise frame timing callback
-                    // =============================================================
-                    // PREVIOUS (in client.js): (not present)
                     setupFrameCallback(video);
-                    // =============================================================
                 };
                 
                 setTimeout(() => {
@@ -781,16 +637,12 @@ async function startStream() {
             offerToReceiveAudio: false
         });
         
-        // =================================================================
-        // NEW: Debug logging to verify DataChannel is in offer SDP
-        // =================================================================
         console.log('📋 Offer SDP created');
         if (offer.sdp.includes('m=application')) {
             console.log('✅ DataChannel IS in offer SDP (m=application found)');
         } else {
             console.error('❌ DataChannel NOT in offer SDP - check createDataChannel!');
         }
-        // =================================================================
         
         await pc.setLocalDescription(offer);
         console.log('Created offer, sending to server...');
@@ -825,19 +677,17 @@ async function startStream() {
     }
 }
 
+
 // =============================================================================
-// CHANGED: stopStream now cleans up latency measurement resources
+// IMPROVED: Stop stream with clock sync cleanup
 // =============================================================================
 function stopStream() {
     console.log('Stopping stream...');
     
     stopMetricsCollection();
     stopDurationTimer();
+    stopClockSync();  // NEW: Stop clock synchronization
     
-    // =========================================================================
-    // NEW: Cancel frame callback
-    // =========================================================================
-    // PREVIOUS (in client.js): (not present)
     if (frameCallbackId !== null) {
         const video = document.getElementById('video');
         if (video && video.cancelVideoFrameCallback) {
@@ -845,19 +695,13 @@ function stopStream() {
         }
         frameCallbackId = null;
     }
-    // =========================================================================
     
     if (pc) {
         pc.close();
         pc = null;
     }
     
-    // =========================================================================
-    // NEW: Clear timestamp channel
-    // =========================================================================
-    // PREVIOUS (in client.js): (not present)
     timestampChannel = null;
-    // =========================================================================
     
     const video = document.getElementById('video');
     if (video) video.srcObject = null;
@@ -881,8 +725,9 @@ function stopStream() {
     console.log('Stream stopped');
 }
 
+
 // =============================================================================
-// Metrics Collection (mostly unchanged)
+// Metrics Collection
 // =============================================================================
 
 function startMetricsCollection() {
@@ -909,9 +754,6 @@ function stopMetricsCollection() {
     lastStatsTime = null;
 }
 
-// =============================================================================
-// CHANGED: processStats now also extracts jitter buffer delay
-// =============================================================================
 function processStats(stats) {
     const now = Date.now();
     
@@ -940,15 +782,11 @@ function processStats(stats) {
             const jitter = report.jitter ? (report.jitter * 1000).toFixed(2) : 0;
             updateMetric('jitter', jitter);
             
-            // =================================================================
-            // NEW: Extract jitter buffer delay
-            // =================================================================
-            // PREVIOUS (in client.js): (not present)
+            // Jitter buffer delay
             if (report.jitterBufferDelay && report.jitterBufferEmittedCount) {
                 const jbDelay = (report.jitterBufferDelay / report.jitterBufferEmittedCount * 1000).toFixed(2);
                 updateMetric('jitterBuffer', jbDelay);
             }
-            // =================================================================
             
             lastStats = {
                 framesReceived: report.framesReceived,
@@ -957,74 +795,33 @@ function processStats(stats) {
             lastStatsTime = now;
         }
         
-        // =====================================================================
-        // CHANGED: Network RTT calculation
-        // =====================================================================
-        // PREVIOUS CODE (only works for sender, not receiver):
-        // =====================================================================
-        // // Network RTT from remote-inbound-rtp (only available on sender side)
-        // if (report.type === 'remote-inbound-rtp' && report.kind === 'video') {
-        //     if (report.roundTripTime !== undefined && report.roundTripTime > 0) {
-        //         const rtt = (report.roundTripTime * 1000).toFixed(2);
-        //         updateMetric('latency', rtt);
-        //     }
-        // }
-        // =====================================================================
-        
-        // =====================================================================
-        // NEW CODE: Use candidate-pair stats for RTT (works for receiver)
-        // =====================================================================
-        // The 'candidate-pair' stats contain currentRoundTripTime which is
-        // measured via STUN connectivity checks and works for both sender/receiver
+        // Network RTT from candidate-pair stats
         if (report.type === 'candidate-pair' && report.state === 'succeeded') {
             if (report.currentRoundTripTime !== undefined && report.currentRoundTripTime > 0) {
                 const rtt = (report.currentRoundTripTime * 1000).toFixed(2);
                 updateMetric('latency', rtt);
             }
         }
-        // =====================================================================
     });
 }
 
-// =============================================================================
-// CHANGED: updateMetric now handles jitterBuffer metric
-// =============================================================================
-// =============================================================================
-// CHANGED: updateMetric now handles jitterBuffer metric and updates both overlay and sidebar
-// =============================================================================
 function updateMetric(metric, value) {
     const timestamp = new Date().toLocaleTimeString();
     
     switch (metric) {
         case 'fps':
-            // =============================================================
-            // PREVIOUS CODE (single element update):
-            // =============================================================
-            // const fpsEl = document.getElementById('fps-value');
-            // if (fpsEl) fpsEl.textContent = value;
-            // updateChart(fpsChart, timestamp, value);
-            // =============================================================
-            
-            // =============================================================
-            // NEW CODE (update both sidebar and overlay):
-            // =============================================================
             const fpsEl = document.getElementById('fps-value');
             const overlayFpsEl = document.getElementById('overlay-fps');
             if (fpsEl) fpsEl.textContent = value;
             if (overlayFpsEl) overlayFpsEl.textContent = value;
             updateChart(fpsChart, timestamp, value);
-            // =============================================================
             break;
             
         case 'resolution':
-            // =============================================================
-            // NEW: Update both sidebar and overlay for resolution
-            // =============================================================
             const resEl = document.getElementById('resolution-value');
             const overlayResEl = document.getElementById('overlay-resolution');
             if (resEl) resEl.textContent = value;
             if (overlayResEl) overlayResEl.textContent = value;
-            // =============================================================
             break;
             
         case 'latency':
@@ -1050,20 +847,16 @@ function updateMetric(metric, value) {
             if (jitEl) jitEl.textContent = value;
             break;
         
-        // =================================================================
-        // NEW: Handle jitter buffer metric
-        // =================================================================
-        // PREVIOUS (in client.js): (not present)
         case 'jitterBuffer':
             const jbEl = document.getElementById('jitter-buffer-value');
             if (jbEl) jbEl.textContent = value;
             break;
-        // =================================================================
     }
 }
 
+
 // =============================================================================
-// Duration Timer (unchanged)
+// Duration Timer
 // =============================================================================
 
 function startDurationTimer() {
@@ -1091,14 +884,13 @@ function stopDurationTimer() {
     connectionStartTime = null;
 }
 
+
 // =============================================================================
 // Initialization
 // =============================================================================
-// CHANGED: Added check for latency support in config
 
 window.addEventListener('DOMContentLoaded', async () => {
-    // CHANGED: Updated log message
-    console.log('🚀 Glass-to-Glass Latency Measurement Client initialized');
+    console.log('🚀 Glass-to-Glass Latency Measurement Client initialized (IMPROVED CLOCK SYNC)');
     
     initializeCharts();
     
@@ -1108,14 +900,9 @@ window.addEventListener('DOMContentLoaded', async () => {
         const senderEl = document.getElementById('sender-url');
         if (senderEl) senderEl.textContent = config.sender_url;
         
-        // =================================================================
-        // NEW: Check if server supports latency measurement
-        // =================================================================
-        // PREVIOUS (in client.js): (not present)
         if (config.latency_supported) {
             console.log('✅ Server supports glass-to-glass latency measurement');
         }
-        // =================================================================
     } catch (error) {
         console.error('Failed to load config:', error);
     }
