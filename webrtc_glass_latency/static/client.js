@@ -59,7 +59,13 @@ const timestampBuffer = new Map();
 const MAX_TIMESTAMP_BUFFER = 100;
 
 // =============================================================================
-// IMPROVED: Clock synchronization with better validation
+// Clock synchronization - Currently for monitoring only
+// =============================================================================
+// NOTE: Clock sync is performed but NOT applied to latency calculations because:
+// 1. Timestamps come from Python sender (not Go relay)
+// 2. Python and browser clocks are already synchronized (< 50ms difference)
+// 3. The 21-second offset is between Go relay and browser, not Python and browser
+// Clock sync is kept active for monitoring purposes.
 // =============================================================================
 let clockOffset = 0;
 let clockSyncSamples = [];
@@ -106,22 +112,16 @@ function processTimestamp(data) {
         }
         
         // =================================================================
-        // NEW: Only process latency after clock sync is complete
+        // FIX: Don't apply clock offset to Python timestamps
         // =================================================================
-        if (!clockSyncComplete) {
-            if (timestampBuffer.size === 1 || data.frame_num % 30 === 0) {
-                console.warn(`⏳ Waiting for clock sync to complete (${clockSyncSamples.length}/${CLOCK_SYNC_SAMPLES} samples)`);
-            }
-            return;
-        }
-        // =================================================================
-        
-        // =================================================================
-        // FIXED: Correct sign - use + instead of -
-        // =================================================================
-        // BEFORE: const networkLatency = receiveTime - data.capture_ms - clockOffset;
-        // AFTER:
-        const networkLatency = receiveTime - data.capture_ms + clockOffset;
+        // The clock offset is between Go relay and browser, but timestamps
+        // come from Python sender. Looking at the actual values:
+        //   receiveTime ≈ 1764676027287 (browser epoch ms)
+        //   capture_ms  ≈ 1764676027258 (Python epoch ms)
+        // These are only ~29ms apart, showing Python and browser clocks
+        // are already synchronized! The 21-second offset is between Go
+        // relay and browser, which shouldn't be applied here.
+        const networkLatency = receiveTime - data.capture_ms;
         // =================================================================
         
         // Update current latency estimate (with sanity check)
@@ -182,12 +182,12 @@ function processClockSync(data) {
         const newOffset = offsets[Math.floor(offsets.length / 2)];
         
         // =============================================================
-        // NEW: Warn if offset is abnormally large
+        // Warn if offset is abnormally large (for monitoring)
         // =============================================================
         if (Math.abs(newOffset) > 5000 && !clockSyncComplete) {
-            console.warn(`⚠️ Large clock offset detected: ${newOffset.toFixed(2)}ms (${(newOffset/1000).toFixed(1)} seconds)`);
-            console.warn(`   This suggests system clocks are out of sync. Consider enabling NTP.`);
-            console.warn(`   Latency measurements will still work but may be less accurate.`);
+            console.warn(`⚠️ Clock offset between Go relay and browser: ${newOffset.toFixed(2)}ms (${(newOffset/1000).toFixed(1)}s)`);
+            console.warn(`   This is normal if relay and browser are on different machines.`);
+            console.warn(`   Latency measurements use Python→Browser sync, not affected by this offset.`);
         }
         // =============================================================
         
@@ -198,9 +198,9 @@ function processClockSync(data) {
         // =============================================================
         if (clockSyncSamples.length >= CLOCK_SYNC_SAMPLES && !clockSyncComplete) {
             clockSyncComplete = true;
-            console.log(`✅ Clock sync complete: offset=${clockOffset.toFixed(2)}ms (from ${bestSamples.length} best samples)`);
+            console.log(`✅ Clock sync complete (relay↔browser): offset=${clockOffset.toFixed(2)}ms - for monitoring only`);
         } else {
-            console.log(`🕐 Clock sync: offset=${clockOffset.toFixed(2)}ms, RTT=${rtt.toFixed(2)}ms (${clockSyncSamples.length}/${CLOCK_SYNC_SAMPLES} samples)`);
+            console.log(`🕐 Clock sync (relay↔browser): offset=${clockOffset.toFixed(2)}ms, RTT=${rtt.toFixed(2)}ms (${clockSyncSamples.length}/${CLOCK_SYNC_SAMPLES})`);
         }
         // =============================================================
     }
@@ -341,10 +341,10 @@ function setupFrameCallback(video) {
                 if (Math.abs(frameNum - approxFrameNum) < 5) {
                     // Calculate glass-to-glass latency
                     const captureTime = tsData.capture_ms;
-                    const adjustedCaptureTime = captureTime + clockOffset;  // FIXED: + not -
+                    // Don't apply clock offset - Python and browser clocks are synchronized
                     const displayTimeMs = displayTime;
                     
-                    const glassLatency = displayTimeMs - adjustedCaptureTime;
+                    const glassLatency = displayTimeMs - captureTime;
                     
                     if (glassLatency > 0 && glassLatency < 5000) {
                         // Add display buffer estimate (~16ms for 60Hz)
@@ -890,7 +890,8 @@ function stopDurationTimer() {
 // =============================================================================
 
 window.addEventListener('DOMContentLoaded', async () => {
-    console.log('🚀 Glass-to-Glass Latency Measurement Client initialized (IMPROVED CLOCK SYNC)');
+    console.log('🚀 Glass-to-Glass Latency Measurement Client (Python→Browser direct sync)');
+    console.log('   Note: Clock sync with Go relay is for monitoring only');
     
     initializeCharts();
     
