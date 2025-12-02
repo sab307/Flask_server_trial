@@ -16,13 +16,17 @@
  * 7. Added updateGlassLatency function to calculate and display latency
  * 
  * =============================================================================
- * CLOCK SYNC FIXES APPLIED (Latest):
+ * ADAPTIVE CLOCK SYNC (Latest):
  * =============================================================================
- * 8. FIXED: Corrected sign in networkLatency calculation (+ instead of -)
- * 9. IMPROVED: Better clock synchronization with rapid initial sampling
- * 10. IMPROVED: Outlier rejection for clock sync samples
- * 11. IMPROVED: Only measure latency after clock sync completes
- * 12. IMPROVED: Warnings for large clock offsets
+ * 8. Auto-detects clock skew between sender and receiver
+ * 9. If raw latency > 1000ms: Applies two-stage offset compensation
+ * 10. If raw latency < 1000ms: Uses raw latency (clocks synced)
+ * 11. Works seamlessly for both same-machine and remote access scenarios
+ * 
+ * SCENARIOS HANDLED:
+ * - Same machine access: No compensation needed (clocks synced)
+ * - Remote access with clock skew: Automatic compensation applied
+ * - Mixed environments: Adapts per-frame based on detection
  * =============================================================================
  */
 
@@ -59,20 +63,25 @@ const timestampBuffer = new Map();
 const MAX_TIMESTAMP_BUFFER = 100;
 
 // =============================================================================
-// Clock synchronization - Two-stage offset calculation
+// Adaptive Clock Synchronization
 // =============================================================================
-// System architecture:
-//   Python Sender (Computer A) → Go Relay (Computer A) → Browser (Computer B)
+// Automatically detects and compensates for clock skew between machines:
+// 
+// DETECTION: Checks raw latency (receiveTime - capture_ms)
+//   - If > 1000ms: Clock skew detected → Apply two-stage compensation
+//   - If < 1000ms: Clocks synced → Use raw latency
 //
-// We need to sync Python→Browser, but they don't communicate directly.
-// Solution: Calculate offset_python_browser = offset_python_go + offset_go_browser
+// TWO-STAGE COMPENSATION (when clock skew detected):
+//   offset_python_browser = offset_python_go + offset_go_browser
+//   latency = raw_latency + offset_python_browser
 //
-// 1. offset_python_go: Estimated from relay_time_ms - send_time_ms
-// 2. offset_go_browser: Measured via ping/pong (this value)
-// 3. Total offset applied to latency calculations
+// This handles:
+//   ✅ Same machine access (no skew, no compensation)
+//   ✅ Remote access with 22-second clock difference (auto-compensated)
+//   ✅ Mixed environments (adapts automatically per frame)
 // =============================================================================
 let clockOffsetGoBrowser = 0;      // Go relay ↔ Browser offset (from ping/pong)
-let clockOffsetPythonBrowser = 0;  // Python sender → Browser offset (calculated)
+let clockOffsetPythonBrowser = 0;  // Python sender → Browser offset (calculated when needed)
 let clockSyncSamples = [];
 const CLOCK_SYNC_SAMPLES = 10;
 let clockSyncComplete = false;
@@ -118,25 +127,52 @@ function processTimestamp(data) {
         }
         
         // =================================================================
-        // Calculate Python→Browser offset using two-stage approach
+        // ADAPTIVE CLOCK SYNC: Auto-detect and compensate for clock skew
         // =================================================================
-        // offset_python_go: Difference between Python and Go relay clocks
-        //   - relay_time_ms: Go's timestamp when it received the message
-        //   - send_time_ms: Python's timestamp when it sent the message
-        //   - Difference represents clock skew between machines
-        const offsetPythonGo = (data.relay_time_ms || data.send_time_ms) - data.send_time_ms;
+        // Calculate raw latency (no compensation)
+        const rawLatency = receiveTime - data.capture_ms;
         
-        // offset_python_browser: Total offset from Python to Browser
-        //   = offset_python_go + offset_go_browser
-        clockOffsetPythonBrowser = offsetPythonGo + clockOffsetGoBrowser;
+        // Detect if clocks are significantly out of sync
+        // Threshold: 1000ms (1 second)
+        // - If rawLatency > 1000ms: Clocks are out of sync, apply compensation
+        // - If rawLatency < 1000ms: Clocks are synced, use raw value
+        const CLOCK_SKEW_THRESHOLD = 1000; // milliseconds
+        const hasClockSkew = Math.abs(rawLatency) > CLOCK_SKEW_THRESHOLD;
         
-        // Debug: Log offset calculation every 60 frames (~2 seconds at 30fps)
-        if (data.frame_num % 60 === 0) {
-            console.log(`🔧 Offset calc: Python→Go=${offsetPythonGo.toFixed(2)}ms + Go→Browser=${clockOffsetGoBrowser.toFixed(2)}ms = Total=${clockOffsetPythonBrowser.toFixed(2)}ms`);
+        let networkLatency;
+        let compensationApplied = false;
+        
+        if (hasClockSkew) {
+            // =============================================================
+            // SCENARIO 1: Large clock offset detected (e.g., 22 seconds)
+            // =============================================================
+            // Calculate Python→Browser offset using two-stage approach
+            const offsetPythonGo = (data.relay_time_ms || data.send_time_ms) - data.send_time_ms;
+            clockOffsetPythonBrowser = offsetPythonGo + clockOffsetGoBrowser;
+            
+            // Apply compensation
+            networkLatency = rawLatency + clockOffsetPythonBrowser;
+            compensationApplied = true;
+            
+            // Debug logging every 60 frames (~2 seconds at 30fps)
+            if (data.frame_num % 60 === 0) {
+                console.log(`🔧 Clock skew detected! Raw=${rawLatency.toFixed(0)}ms`);
+                console.log(`   Offset: Python→Go=${offsetPythonGo.toFixed(2)}ms + Go→Browser=${clockOffsetGoBrowser.toFixed(2)}ms = ${clockOffsetPythonBrowser.toFixed(2)}ms`);
+                console.log(`   Compensated latency: ${networkLatency.toFixed(1)}ms`);
+            }
+        } else {
+            // =============================================================
+            // SCENARIO 2: Clocks are synced (same machine or NTP synced)
+            // =============================================================
+            // Use raw latency directly (no compensation needed)
+            networkLatency = rawLatency;
+            clockOffsetPythonBrowser = 0; // No offset needed
+            
+            // Debug logging every 60 frames
+            if (data.frame_num % 60 === 0) {
+                console.log(`✅ Clocks synced! Latency=${networkLatency.toFixed(1)}ms (no compensation needed)`);
+            }
         }
-        
-        // Apply the full Python→Browser offset
-        const networkLatency = receiveTime - data.capture_ms + clockOffsetPythonBrowser;
         // =================================================================
         
         // Update current latency estimate (with sanity check)
@@ -144,7 +180,8 @@ function processTimestamp(data) {
             updateGlassLatency(networkLatency);
         } else {
             if (data.frame_num % 30 === 0) {  // Log every 30 frames
-                console.warn(`⚠️ Invalid latency: ${networkLatency.toFixed(1)}ms (receiveTime=${receiveTime.toFixed(0)}, capture=${data.capture_ms?.toFixed(0)}, offset_total=${clockOffsetPythonBrowser.toFixed(2)})`);
+                const status = compensationApplied ? "compensated" : "raw";
+                console.warn(`⚠️ Invalid latency: ${networkLatency.toFixed(1)}ms (${status}, receiveTime=${receiveTime.toFixed(0)}, capture=${data.capture_ms?.toFixed(0)})`);
             }
         }
     } else if (data.type === 'pong') {
@@ -906,8 +943,9 @@ function stopDurationTimer() {
 // =============================================================================
 
 window.addEventListener('DOMContentLoaded', async () => {
-    console.log('🚀 Glass-to-Glass Latency Measurement Client (Two-Stage Clock Sync)');
-    console.log('   Python→Go→Browser offset compensation for multi-machine setups');
+    console.log('🚀 Glass-to-Glass Latency Measurement Client (Adaptive Clock Sync)');
+    console.log('   Auto-detects clock skew and applies compensation when needed');
+    console.log('   Threshold: 1000ms - automatically switches between modes');
     
     initializeCharts();
     
