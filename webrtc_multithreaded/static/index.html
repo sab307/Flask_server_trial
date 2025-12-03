@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Viewer - Glass-to-Glass Latency</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 20px;
+        }
+        
+        header h1 {
+            font-size: 1.8rem;
+            margin-bottom: 10px;
+        }
+        
+        .status-banner {
+            padding: 10px 20px;
+            border-radius: 8px;
+            display: inline-block;
+            font-weight: 500;
+        }
+        
+        .status-banner.disconnected { background: #424242; }
+        .status-banner.connecting { background: #FF9800; color: black; }
+        .status-banner.connected { background: #4CAF50; }
+        .status-banner.error { background: #F44336; }
+        
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .video-section {
+            background: #0f0f1a;
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .video-container {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 16/9;
+            background: #000;
+        }
+        
+        #video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        
+        #video-overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            display: none;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            padding: 15px;
+            justify-content: center;
+        }
+        
+        button {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        #start-btn {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        #start-btn:hover:not(:disabled) {
+            background: #45a049;
+        }
+        
+        #stop-btn {
+            background: #F44336;
+            color: white;
+        }
+        
+        #stop-btn:hover:not(:disabled) {
+            background: #da190b;
+        }
+        
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .panel {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 15px;
+        }
+        
+        .panel h3 {
+            font-size: 0.9rem;
+            color: #888;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        /* Glass-to-Glass Latency Panel - Highlighted */
+        .panel.glass-latency {
+            background: linear-gradient(135deg, rgba(156, 39, 176, 0.2) 0%, rgba(103, 58, 183, 0.2) 100%);
+            border: 2px solid rgba(156, 39, 176, 0.5);
+        }
+        
+        .panel.glass-latency h3 {
+            color: #CE93D8;
+        }
+        
+        .latency-highlight {
+            text-align: center;
+            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+        
+        .latency-highlight .value {
+            font-size: 3rem;
+            font-weight: 700;
+            color: #CE93D8;
+        }
+        
+        .latency-highlight .unit {
+            font-size: 1.2rem;
+            color: #888;
+        }
+        
+        .latency-highlight .label {
+            font-size: 0.85rem;
+            color: #aaa;
+            margin-top: 5px;
+        }
+        
+        .latency-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            text-align: center;
+        }
+        
+        .latency-stat {
+            background: rgba(0,0,0,0.2);
+            padding: 10px;
+            border-radius: 6px;
+        }
+        
+        .latency-stat .label {
+            font-size: 0.75rem;
+            color: #888;
+        }
+        
+        .latency-stat .value {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #CE93D8;
+        }
+        
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .metric-row:last-child {
+            border-bottom: none;
+        }
+        
+        .metric-label {
+            color: #888;
+        }
+        
+        .metric-value {
+            font-weight: 600;
+            color: #4CAF50;
+        }
+        
+        .charts-section {
+            margin-top: 20px;
+        }
+        
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+        }
+        
+        .chart-container {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 15px;
+        }
+        
+        .chart-container h4 {
+            font-size: 0.85rem;
+            color: #888;
+            margin-bottom: 10px;
+        }
+        
+        .chart-wrapper {
+            height: 150px;
+        }
+        
+        /* Glass latency chart highlighted */
+        .chart-container.glass-latency-chart {
+            background: linear-gradient(135deg, rgba(156, 39, 176, 0.15) 0%, rgba(103, 58, 183, 0.15) 100%);
+            border: 1px solid rgba(156, 39, 176, 0.3);
+        }
+        
+        .info-box {
+            background: rgba(33, 150, 243, 0.1);
+            border: 1px solid rgba(33, 150, 243, 0.3);
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 15px;
+            font-size: 0.85rem;
+        }
+        
+        .info-box h4 {
+            color: #64B5F6;
+            margin-bottom: 8px;
+        }
+        
+        .info-box p {
+            color: #aaa;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎥 WebRTC Video Receiver</h1>
+            <div id="status-banner" class="status-banner disconnected">
+                <span id="status-text">Disconnected</span>
+            </div>
+        </header>
+        
+        <div class="main-grid">
+            <div class="left-column">
+                <div class="video-section">
+                    <div class="video-container">
+                        <video id="video" autoplay muted playsinline></video>
+                        <div id="video-overlay">
+                            <!-- ================================================= -->
+                            <!-- PREVIOUS CODE (duplicate IDs caused issues):      -->
+                            <!-- ================================================= -->
+                            <!-- <span id="resolution-value">-</span> @ <span id="fps-value">-</span> FPS -->
+                            <!-- ================================================= -->
+                            
+                            <!-- ================================================= -->
+                            <!-- NEW CODE (unique IDs for overlay):                -->
+                            <!-- ================================================= -->
+                            <span id="overlay-resolution">-</span> @ <span id="overlay-fps">-</span> FPS
+                            <!-- ================================================= -->
+                        </div>
+                    </div>
+                    <div class="controls">
+                        <button id="start-btn">▶ Start Stream</button>
+                        <button id="stop-btn" disabled>⏹ Stop Stream</button>
+                    </div>
+                </div>
+                
+                <div class="charts-section">
+                    <div class="charts-grid">
+                        <!-- Glass-to-Glass Latency Chart (Highlighted) -->
+                        <div class="chart-container glass-latency-chart">
+                            <h4>📊 Glass-to-Glass Latency (Camera → Display)</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="glass-latency-chart"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="chart-container">
+                            <h4>📊 Frame Rate</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="fps-chart"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="chart-container">
+                            <h4>📊 Network RTT</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="latency-chart"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="chart-container">
+                            <h4>📊 Bitrate</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="bitrate-chart"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="chart-container">
+                            <h4>📊 Packet Loss</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="packet-loss-chart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="sidebar">
+                <!-- Glass-to-Glass Latency Panel (Primary) -->
+                <div class="panel glass-latency">
+                    <h3>🔬 Glass-to-Glass Latency</h3>
+                    
+                    <div class="latency-highlight">
+                        <span id="glass-latency-value" class="value">-</span>
+                        <span class="unit">ms</span>
+                        <div class="label">Camera Capture → Screen Display</div>
+                    </div>
+                    
+                    <div class="latency-stats">
+                        <div class="latency-stat">
+                            <div class="label">MIN</div>
+                            <div class="value"><span id="glass-latency-min">-</span></div>
+                        </div>
+                        <div class="latency-stat">
+                            <div class="label">AVG</div>
+                            <div class="value"><span id="glass-latency-avg">-</span></div>
+                        </div>
+                        <div class="latency-stat">
+                            <div class="label">MAX</div>
+                            <div class="value"><span id="glass-latency-max">-</span></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Connection Info -->
+                <div class="panel">
+                    <h3>Connection</h3>
+                    <div class="metric-row">
+                        <span class="metric-label">State</span>
+                        <span id="connection-state" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">ICE</span>
+                        <span id="ice-state" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Duration</span>
+                        <span id="duration" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Source</span>
+                        <span id="sender-url" class="metric-value" style="font-size: 0.8rem;">-</span>
+                    </div>
+                </div>
+                
+                <!-- Video Stats -->
+                <div class="panel">
+                    <h3>Video Statistics</h3>
+                    <div class="metric-row">
+                        <span class="metric-label">Resolution</span>
+                        <span id="resolution-value" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Frame Rate</span>
+                        <span class="metric-value"><span id="fps-value">-</span> FPS</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Bitrate</span>
+                        <span class="metric-value"><span id="bitrate-value">-</span> Mbps</span>
+                    </div>
+                </div>
+                
+                <!-- Network Stats -->
+                <div class="panel">
+                    <h3>Network Statistics</h3>
+                    <div class="metric-row">
+                        <span class="metric-label">Network RTT</span>
+                        <span class="metric-value"><span id="latency-value">-</span> ms</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Jitter</span>
+                        <span class="metric-value"><span id="jitter-value">-</span> ms</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Jitter Buffer</span>
+                        <span class="metric-value"><span id="jitter-buffer-value">-</span> ms</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Packets Lost</span>
+                        <span class="metric-value"><span id="packets-lost-value">-</span></span>
+                    </div>
+                </div>
+                
+                <!-- Info Box -->
+                <div class="info-box">
+                    <h4>ℹ️ About Glass-to-Glass Latency</h4>
+                    <p>
+                        This measures the total time from when light hits the camera sensor 
+                        to when the image appears on your screen. It includes:
+                    </p>
+                    <ul style="margin: 10px 0; padding-left: 20px; color: #aaa;">
+                        <li>Camera capture & processing</li>
+                        <li>ROS2 message handling</li>
+                        <li>H264 encoding</li>
+                        <li>Network transmission</li>
+                        <li>WebRTC processing</li>
+                        <li>H264 decoding</li>
+                        <li>Display rendering</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="client.js"></script>
+</body>
+</html>
